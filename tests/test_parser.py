@@ -167,6 +167,111 @@ def test_dictionary_expression():
     assert len(expression.entries) == 1
 
 
+def test_list_comprehension_preserves_existing_ast_shape():
+    source = "squares = [x * x for x in values if x > 0]\n"
+    compile(source, "<test>", "exec")
+    expression = parse(source).body[0].value
+
+    assert isinstance(expression, ast.ListComprehension)
+    assert len(expression.generators) == 1
+    assert len(expression.generators[0].conditions) == 1
+
+
+def test_generator_expression():
+    source = (
+        "squares = (x * x for x in range(10))\n"
+        "total = sum(x * x for x in range(10))\n"
+    )
+    compile(source, "<test>", "exec")
+    expression, call = [stmt.value for stmt in parse(source).body]
+
+    assert isinstance(expression, ast.GeneratorExpression)
+    assert expression.element.operator == "*"
+    assert len(expression.generators) == 1
+    assert isinstance(call.arguments[0], ast.GeneratorExpression)
+
+
+def test_set_and_dictionary_comprehensions():
+    source = (
+        "unique_squares = {x * x for x in values}\n"
+        "square_map = {x: x * x for x in values}\n"
+    )
+    compile(source, "<test>", "exec")
+    set_expression, dict_expression = [stmt.value for stmt in parse(source).body]
+
+    assert isinstance(set_expression, ast.SetComprehension)
+    assert isinstance(dict_expression, ast.DictionaryComprehension)
+    assert dict_expression.key.name == "x"
+    assert dict_expression.element.operator == "*"
+
+
+def test_comprehensions_with_multiple_clauses_and_filters():
+    source = (
+        "values = [\n"
+        "    (x, y)\n"
+        "    for x in rows if x\n"
+        "    if keep(x)\n"
+        "    for y in columns if y > 0\n"
+        "]\n"
+        "pairs = {x: y for x in rows for y in columns if valid(x, y)}\n"
+    )
+    compile(source, "<test>", "exec")
+    list_expression, dict_expression = [stmt.value for stmt in parse(source).body]
+
+    assert isinstance(list_expression, ast.ListComprehension)
+    assert len(list_expression.generators) == 2
+    assert [len(clause.conditions) for clause in list_expression.generators] == [
+        2, 1,
+    ]
+    assert isinstance(dict_expression, ast.DictionaryComprehension)
+    assert len(dict_expression.generators) == 2
+
+
+def test_nested_generator_expression_inside_comprehension():
+    source = "nested = [tuple(x for x in row) for row in rows]\n"
+    compile(source, "<test>", "exec")
+    outer = parse(source).body[0].value
+
+    assert isinstance(outer, ast.ListComprehension)
+    assert isinstance(outer.element, ast.CallExpression)
+    assert isinstance(outer.element.arguments[0], ast.GeneratorExpression)
+
+
+def test_async_comprehension_clauses():
+    source = (
+        "async def collect(streams):\n"
+        "    return [item async for stream in streams "
+        "for item in stream if item]\n"
+    )
+    compile(source, "<test>", "exec")
+    expression = parse(source).body[0].body[0].value
+
+    assert isinstance(expression, ast.ListComprehension)
+    assert expression.generators[0].is_async is True
+    assert expression.generators[1].is_async is False
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "values = [x for x in]\n",
+        "values = {x for x in items if}\n",
+        "values = {x: for x in items}\n",
+        "values = (x for x in items for)\n",
+        "values = consume(x for x in items, other)\n",
+        "values = consume(x for x in items,)\n",
+        "values = consume(value=x for x in items)\n",
+        "values = [item async for item in items]\n",
+    ],
+)
+def test_invalid_comprehensions_match_cpython(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+
+    with pytest.raises(ParserError):
+        parse(source)
+
+
 def test_unary_expression():
     tree = parse("x = -10")
 

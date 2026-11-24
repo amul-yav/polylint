@@ -279,9 +279,29 @@ class DictionaryExpression(ASTNode):
 
 
 @dataclass
-class ListComprehension(ASTNode):
+class ComprehensionExpression(ASTNode):
     element: ASTNode | None = None
     generators: list[ASTNode] = field(default_factory=list)
+
+
+@dataclass
+class ListComprehension(ComprehensionExpression):
+    pass
+
+
+@dataclass
+class SetComprehension(ComprehensionExpression):
+    pass
+
+
+@dataclass
+class GeneratorExpression(ComprehensionExpression):
+    pass
+
+
+@dataclass
+class DictionaryComprehension(ComprehensionExpression):
+    key: ASTNode | None = None
 
 
 @dataclass

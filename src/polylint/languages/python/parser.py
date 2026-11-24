@@ -68,6 +68,7 @@ class Parser:
     def __init__(self, tokens: list[Token]):
         self.tokens = tokens
         self.position = 0
+        self._in_async_function = False
 
     # ==========================================
     # Token utilities
@@ -401,7 +402,12 @@ class Parser:
         if self.match("->"):
             returns = self.parse_expression()
 
-        body = self.parse_suite()
+        previous_async_context = self._in_async_function
+        self._in_async_function = is_async
+        try:
+            body = self.parse_suite()
+        finally:
+            self._in_async_function = previous_async_context
 
         return ast.FunctionDefinition(
             line=line,
@@ -476,7 +482,12 @@ class Parser:
                 bases = self.parse_expression_list()
             self.expect(")")
 
-        body = self.parse_suite()
+        previous_async_context = self._in_async_function
+        self._in_async_function = False
+        try:
+            body = self.parse_suite()
+        finally:
+            self._in_async_function = previous_async_context
 
         return ast.ClassDefinition(
             line=line, column=column,
@@ -844,7 +855,12 @@ class Parser:
         if self.match("lambda"):
             parameters = self.parse_parameters_until_colon()
             self.expect(":")
-            body = self.parse_expression()
+            previous_async_context = self._in_async_function
+            self._in_async_function = False
+            try:
+                body = self.parse_expression()
+            finally:
+                self._in_async_function = previous_async_context
             return ast.LambdaExpression(
                 line=line, column=column,
                 parameters=parameters, body=body,
@@ -861,6 +877,14 @@ class Parser:
                 return ast.TupleExpression(line=line, column=column, elements=[])
 
             expression = self.parse_expression()
+
+            if self._starts_comprehension():
+                generators = self.parse_comprehensions()
+                self.expect(")")
+                return ast.GeneratorExpression(
+                    line=line, column=column,
+                    element=expression, generators=generators,
+                )
 
             if self.match(","):
                 elements = [expression]
@@ -990,6 +1014,7 @@ class Parser:
 
         while not self.check(")") and not self.check_type(TokenType.EOF):
             line, column = self.location()
+            keyword_argument = False
 
             if self.match("**"):
                 value = self.parse_expression()
@@ -1012,6 +1037,7 @@ class Parser:
                 name = self.advance().value
                 self.advance()
                 value = self.parse_expression()
+                keyword_argument = True
                 arguments.append(
                     ast.KeywordArgument(
                         line=line, column=column,
@@ -1019,7 +1045,35 @@ class Parser:
                     )
                 )
             else:
-                arguments.append(self.parse_expression())
+                argument = self.parse_expression()
+                if self._starts_comprehension():
+                    if arguments or keyword_argument:
+                        raise ParserError(
+                            "an unparenthesized generator expression must be "
+                            "the only call argument",
+                            self.current,
+                        )
+                    generators = self.parse_comprehensions()
+                    argument = ast.GeneratorExpression(
+                        line=argument.line,
+                        column=argument.column,
+                        element=argument,
+                        generators=generators,
+                    )
+                    if self.check(","):
+                        raise ParserError(
+                            "an unparenthesized generator expression cannot "
+                            "have a trailing comma",
+                            self.current,
+                        )
+                arguments.append(argument)
+
+            if keyword_argument and self._starts_comprehension():
+                raise ParserError(
+                    "an unparenthesized generator expression cannot be a "
+                    "keyword argument",
+                    self.current,
+                )
 
             if not self.match(","):
                 break
@@ -1070,8 +1124,8 @@ class Parser:
 
         first = self.parse_expression()
 
-        if self.match("for"):
-            generators = [self.parse_comprehension()]
+        if self._starts_comprehension():
+            generators = self.parse_comprehensions()
             self.expect("]")
             return ast.ListComprehension(
                 line=line, column=column,
@@ -1091,26 +1145,42 @@ class Parser:
             line=line, column=column, elements=elements,
         )
 
-    def parse_comprehension(self) -> ast.Comprehension:
-        line, column = self.location()
-        is_async = False
-
-        if self.match("async"):
-            is_async = True
-
-        target = self.parse_expression(6)
-        self.expect("in")
-        iterable = self.parse_expression(2)
-
-        conditions = []
-        while self.match("if"):
-            conditions.append(self.parse_expression(2))
-
-        return ast.Comprehension(
-            line=line, column=column,
-            target=target, iterable=iterable,
-            conditions=conditions, is_async=is_async,
+    def _starts_comprehension(self) -> bool:
+        return self.check("for") or (
+            self.check("async") and self.peek().value == "for"
         )
+
+    def parse_comprehensions(self) -> list[ast.Comprehension]:
+        """Parse one or more ``for`` clauses, each with its own filters."""
+        generators = []
+
+        while self._starts_comprehension():
+            line, column = self.location()
+            is_async = self.match("async")
+            if is_async and not self._in_async_function:
+                raise ParserError(
+                    "asynchronous comprehensions are only allowed in an "
+                    "async function",
+                    self.current,
+                )
+            self.expect("for")
+            target = self.parse_expression(6)
+            self.expect("in")
+            iterable = self.parse_expression(2)
+
+            conditions = []
+            while self.match("if"):
+                conditions.append(self.parse_expression(2))
+
+            generators.append(
+                ast.Comprehension(
+                    line=line, column=column,
+                    target=target, iterable=iterable,
+                    conditions=conditions, is_async=is_async,
+                )
+            )
+
+        return generators
 
     def parse_brace_expression(self, line: int, column: int) -> ast.ASTNode:
         if self.match("}"):
@@ -1122,6 +1192,14 @@ class Parser:
 
         if self.match(":"):
             first_value = self.parse_expression()
+            if self._starts_comprehension():
+                generators = self.parse_comprehensions()
+                self.expect("}")
+                return ast.DictionaryComprehension(
+                    line=line, column=column,
+                    element=first_value, generators=generators,
+                    key=first,
+                )
             entries = [(first, first_value)]
 
             while self.match(","):
@@ -1135,6 +1213,14 @@ class Parser:
             self.expect("}")
             return ast.DictionaryExpression(
                 line=line, column=column, entries=entries,
+            )
+
+        if self._starts_comprehension():
+            generators = self.parse_comprehensions()
+            self.expect("}")
+            return ast.SetComprehension(
+                line=line, column=column,
+                element=first, generators=generators,
             )
 
         elements = [first]

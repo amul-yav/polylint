@@ -166,6 +166,22 @@ class TestUndefinedNames:
         diags = analyze("result = [missing for x in range(3)]\n")
         assert has(diags, "PL-UNDEF")
 
+    def test_new_comprehension_forms_check_keys_values_and_clauses(self):
+        diags = analyze(
+            "generator = (item for item in source if keep(item))\n"
+            "unique = {item for item in source if keep(item)}\n"
+            "mapping = {missing_key: missing_value for item in source}\n"
+        )
+        undefined_messages = [
+            diagnostic.message for diagnostic in diags
+            if diagnostic.code == "PL-UNDEF"
+        ]
+
+        assert any("missing_key" in message for message in undefined_messages)
+        assert any("missing_value" in message for message in undefined_messages)
+        assert any("source" in message for message in undefined_messages)
+        assert any("keep" in message for message in undefined_messages)
+
     def test_undefined_attribute_object(self):
         diags = analyze("print(missing.attr)\n")
         assert has(diags, "PL-UNDEF")

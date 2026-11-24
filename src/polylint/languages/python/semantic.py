@@ -288,8 +288,7 @@ class SemanticAnalyzer:
             self._declare_in_expr(target, scope)
 
     def _declare_in_expr(self, node: Optional[ast.ASTNode], scope: Scope) -> None:
-        """Walk an expression subtree purely to discover nested scopes
-        (lambdas and list comprehensions) and build their scope objects."""
+        """Walk an expression subtree to discover nested scopes and build them."""
         if node is None:
             return
 
@@ -304,8 +303,8 @@ class SemanticAnalyzer:
             self._declare_in_expr(node.body, lambda_scope)
             return
 
-        if isinstance(node, ast.ListComprehension):
-            comp_scope = Scope(ScopeKind.COMPREHENSION, parent=scope, name="<listcomp>")
+        if isinstance(node, ast.ComprehensionExpression):
+            comp_scope = Scope(ScopeKind.COMPREHENSION, parent=scope, name="<comprehension>")
             self._scope_of[id(node)] = comp_scope
             for index, generator in enumerate(node.generators):
                 # Only the first generator's iterable is evaluated in the
@@ -316,6 +315,8 @@ class SemanticAnalyzer:
                 self._declare_target(generator.target, comp_scope, SymbolKind.VARIABLE)
                 for condition in generator.conditions:
                     self._declare_in_expr(condition, comp_scope)
+            if isinstance(node, ast.DictionaryComprehension):
+                self._declare_in_expr(node.key, comp_scope)
             self._declare_in_expr(node.element, comp_scope)
             return
 
@@ -645,8 +646,8 @@ class SemanticAnalyzer:
             self._check_lambda(node, scope, defined)
             return
 
-        if isinstance(node, ast.ListComprehension):
-            self._check_listcomp(node, scope, defined)
+        if isinstance(node, ast.ComprehensionExpression):
+            self._check_comprehension(node, scope, defined)
             return
 
         if isinstance(node, ast.Comparison):
@@ -720,7 +721,12 @@ class SemanticAnalyzer:
         self._check_expr(node.body, lambda_scope, lambda_defined)
         self._report_unused(lambda_scope, silent_unused_params=True)
 
-    def _check_listcomp(self, node: ast.ListComprehension, scope: Scope, defined: set) -> None:
+    def _check_comprehension(
+        self,
+        node: ast.ComprehensionExpression,
+        scope: Scope,
+        defined: set,
+    ) -> None:
         comp_scope = self._scope_of[id(node)]
         comp_defined: set = set()
 
@@ -733,6 +739,8 @@ class SemanticAnalyzer:
             for condition in generator.conditions:
                 self._check_expr(condition, comp_scope, comp_defined)
 
+        if isinstance(node, ast.DictionaryComprehension):
+            self._check_expr(node.key, comp_scope, comp_defined)
         self._check_expr(node.element, comp_scope, comp_defined)
         self._report_unused(comp_scope, silent_unused_params=True)
 
