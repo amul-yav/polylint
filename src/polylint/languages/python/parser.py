@@ -564,17 +564,66 @@ class Parser:
         line, column = self.location()
         items = []
 
-        while True:
-            context = self.parse_expression()
-            target = None
+        if self.check("("):
+            opening = self.advance()
+            trailing_comma = False
+            if self.match(")"):
+                # An empty tuple is a valid context expression: ``with ()``.
+                items.append((
+                    ast.TupleExpression(
+                        line=opening.line,
+                        column=opening.column,
+                        elements=[],
+                    ),
+                    None,
+                ))
+            else:
+                while True:
+                    context = self.parse_expression()
+                    target = None
+
+                    if self.match("as"):
+                        target = self.parse_expression()
+
+                    items.append((context, target))
+
+                    if not self.match(","):
+                        break
+                    if self.check(")"):
+                        trailing_comma = True
+                        break
+
+                self.expect(")")
 
             if self.match("as"):
+                if any(target is not None for _context, target in items):
+                    raise ParserError(
+                        "a parenthesized context expression cannot contain "
+                        "'as' items when followed by an outer 'as'",
+                        self.current,
+                    )
+                if len(items) == 1 and not trailing_comma:
+                    context = items[0][0]
+                else:
+                    context = ast.TupleExpression(
+                        line=opening.line,
+                        column=opening.column,
+                        elements=[item for item, _target in items],
+                    )
                 target = self.parse_expression()
+                items = [(context, target)]
+        else:
+            while True:
+                context = self.parse_expression()
+                target = None
 
-            items.append((context, target))
+                if self.match("as"):
+                    target = self.parse_expression()
 
-            if not self.match(","):
-                break
+                items.append((context, target))
+
+                if not self.match(","):
+                    break
 
         body = self.parse_suite()
 

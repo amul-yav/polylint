@@ -153,6 +153,19 @@ class Lexer:
                 self.at_line_start = True
                 continue
 
+            # Explicit line joining removes a backslash and the following
+            # physical newline from the logical line.
+            if char == "\\":
+                if self.source.startswith("\\\r\n", self.position):
+                    self.advance()
+                    self.advance()
+                    self.advance()
+                    continue
+                if self.source.startswith("\\\n", self.position):
+                    self.advance()
+                    self.advance()
+                    continue
+
             # Whitespace
             if char.isspace():
                 self.advance()

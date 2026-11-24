@@ -283,3 +283,104 @@ def test_invalid_exception_group_handler_forms_match_cpython(source):
 
     with pytest.raises(ParserError):
         parse(source)
+
+
+def test_parenthesized_with_multiple_context_managers():
+    source = (
+        "with (\n"
+        "    open('input.txt') as source,\n"
+        "    open('output.txt', 'w') as destination,\n"
+        "):\n"
+        "    destination.write(source.read())\n"
+    )
+    compile(source, "<test>", "exec")
+    statement = parse(source).body[0]
+
+    assert isinstance(statement, ast.WithStatement)
+    assert len(statement.items) == 2
+    assert [target.name for _, target in statement.items] == [
+        "source", "destination",
+    ]
+
+
+def test_parenthesized_with_explicit_line_joins():
+    source = (
+        "with (\\\n"
+        "    open('input.txt') as source,\\\n"
+        "    open('output.txt', 'w') as destination,\\\n"
+        "):\n"
+        "    destination.write(source.read())\n"
+    )
+    compile(source, "<test>", "exec")
+    statement = parse(source).body[0]
+
+    assert len(statement.items) == 2
+    assert statement.body[0].expression.function.attribute == "write"
+
+
+def test_parenthesized_async_with_and_legacy_forms():
+    source = (
+        "async def run():\n"
+        "    async with (first() as one, second() as two,):\n"
+        "        await one.read()\n"
+        "with first() as one, second() as two:\n"
+        "    use(one, two)\n"
+        "with first() as one:\n"
+        "    use(one)\n"
+    )
+    compile(source, "<test>", "exec")
+    tree = parse(source)
+
+    async_with = tree.body[0].body[0]
+    assert async_with.is_async is True
+    assert len(async_with.items) == 2
+    assert len(tree.body[1].items) == 2
+    assert len(tree.body[2].items) == 1
+
+
+def test_parenthesized_context_expression_with_outer_as_target():
+    source = (
+        "with (first()) as manager:\n"
+        "    use(manager)\n"
+        "with (first(), second()) as pair:\n"
+        "    use(pair)\n"
+        "with (first(),) as singleton:\n"
+        "    use(singleton)\n"
+    )
+    compile(source, "<test>", "exec")
+    statements = parse(source).body
+
+    assert len(statements[0].items) == 1
+    assert isinstance(statements[0].items[0][0], ast.CallExpression)
+    assert statements[0].items[0][1].name == "manager"
+    assert isinstance(statements[1].items[0][0], ast.TupleExpression)
+    assert len(statements[1].items[0][0].elements) == 2
+    assert isinstance(statements[2].items[0][0], ast.TupleExpression)
+    assert len(statements[2].items[0][0].elements) == 1
+
+
+def test_empty_tuple_context_expression_remains_valid():
+    source = "with ():\n    pass\n"
+    compile(source, "<test>", "exec")
+    statement = parse(source).body[0]
+
+    assert len(statement.items) == 1
+    assert isinstance(statement.items[0][0], ast.TupleExpression)
+    assert statement.items[0][0].elements == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "with (first(), second():\n    pass\n",
+        "with (first() as one second() as two):\n    pass\n",
+        "with (first(),, second()):\n    pass\n",
+        "with (first() as inner, second()) as outer:\n    pass\n",
+    ],
+)
+def test_invalid_parenthesized_with_syntax_matches_cpython(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+
+    with pytest.raises(ParserError):
+        parse(source)
