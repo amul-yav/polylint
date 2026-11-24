@@ -269,21 +269,30 @@ class Parser:
         line, column = self.location()
         expression = self.parse_expression()
 
+        if self.check(","):
+            expression = self.parse_target_list(
+                expression,
+                terminators={"=", *self.AUGMENTED_OPERATORS},
+            )
+
         if self.current.value in self.AUGMENTED_OPERATORS:
+            self._validate_target(expression, allow_unpacking=False)
             operator = self.advance().value
-            value = self.parse_expression()
+            value = self.parse_assignment_value()
             return ast.AugmentedAssignment(
                 line=line, column=column,
                 target=expression, operator=operator, value=value,
             )
 
         if self.match("="):
+            self._validate_target(expression)
             targets = [expression]
-            value = self.parse_expression()
+            value = self.parse_assignment_value()
 
             while self.match("="):
+                self._validate_target(value)
                 targets.append(value)
-                value = self.parse_expression()
+                value = self.parse_assignment_value()
 
             return ast.Assignment(
                 line=line, column=column,
@@ -293,6 +302,74 @@ class Parser:
         return ast.ExpressionStatement(
             line=line, column=column, expression=expression,
         )
+
+    def parse_target_list(self, first, *, terminators: set[str]) -> ast.ASTNode:
+        """Parse a bare comma-separated target list using tuple AST nodes."""
+        elements = [first]
+        while self.match(","):
+            if (
+                self.current.value in terminators
+                or self.current.value in (")", "]", "}", ":", ";",
+                )
+                or self.current.type in (
+                    TokenType.NEWLINE, TokenType.DEDENT, TokenType.EOF,
+                )
+            ):
+                break
+            elements.append(self.parse_expression(6))
+        return ast.TupleExpression(
+            line=first.line,
+            column=first.column,
+            elements=elements,
+        )
+
+    def parse_assignment_value(self) -> ast.ASTNode:
+        """Parse an assignment RHS, including an unparenthesized tuple."""
+        first = self.parse_expression()
+        if not self.check(","):
+            return first
+        return self.parse_target_list(
+            first,
+            terminators={"=", *self.AUGMENTED_OPERATORS},
+        )
+
+    def _validate_target(
+        self,
+        target: ast.ASTNode,
+        *,
+        allow_unpacking: bool = True,
+    ) -> None:
+        """Reject expressions that cannot be used as binding targets."""
+        if isinstance(
+            target,
+            (ast.Identifier, ast.AttributeAccess, ast.SubscriptExpression),
+        ):
+            return
+
+        if isinstance(target, ast.StarredExpression):
+            raise ParserError("starred target must be inside a list or tuple", self.current)
+
+        if isinstance(target, (ast.TupleExpression, ast.ListExpression)):
+            if not allow_unpacking:
+                raise ParserError("unpacking is not allowed for this target", self.current)
+            starred = sum(
+                isinstance(element, ast.StarredExpression)
+                for element in target.elements
+            )
+            if starred > 1:
+                raise ParserError("multiple starred targets in one unpacking target", self.current)
+            for element in target.elements:
+                if isinstance(element, ast.StarredExpression):
+                    if not isinstance(
+                        element.value,
+                        (ast.Identifier, ast.AttributeAccess, ast.SubscriptExpression),
+                    ):
+                        raise ParserError("invalid starred target", self.current)
+                else:
+                    self._validate_target(element)
+            return
+
+        raise ParserError("invalid assignment target", self.current)
 
     # ==========================================
     # Compound statements
@@ -364,6 +441,9 @@ class Parser:
         line, column = self.location()
 
         target = self.parse_expression(6)
+        if self.check(","):
+            target = self.parse_target_list(target, terminators={"in"})
+        self._validate_target(target)
         self.expect("in")
 
         iterable = self.parse_expression()
@@ -1165,6 +1245,9 @@ class Parser:
                 )
             self.expect("for")
             target = self.parse_expression(6)
+            if self.check(","):
+                target = self.parse_target_list(target, terminators={"in"})
+            self._validate_target(target)
             self.expect("in")
             iterable = self.parse_expression(2)
 

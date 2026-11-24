@@ -277,6 +277,18 @@ class TestScopeAndShadowing:
         diags = analyze("squares = [i * i for i in range(5)]\nprint(i)\n")
         assert has(diags, "PL-UNDEF")
 
+    def test_unpacking_targets_bind_names_in_assignments_loops_and_comprehensions(self):
+        diags = analyze(
+            "def collect(pairs):\n"
+            "    first, *rest = pairs[0]\n"
+            "    result = []\n"
+            "    for key, (value, extra) in pairs:\n"
+            "        result.append((key, value, extra))\n"
+            "    mapped = {(key, value) for key, value in pairs}\n"
+            "    return (first, rest, result, mapped)\n"
+        )
+        assert not errors(diags)
+
     def test_comprehension_can_see_enclosing_scope(self):
         diags = analyze(
             "def f(limit):\n"

@@ -299,6 +299,85 @@ def test_augmented_assignment():
     assert statement.operator == "+="
 
 
+def test_bare_tuple_and_nested_unpacking_targets():
+    source = (
+        "key, value = pair\n"
+        "first, (second, rest) = values\n"
+        "for outer, (inner, *tail) in rows:\n"
+        "    consume(outer, inner, tail)\n"
+    )
+    compile(source, "<test>", "exec")
+    tree = parse(source)
+
+    assignment = tree.body[0]
+    assert isinstance(assignment, ast.Assignment)
+    assert isinstance(assignment.targets[0], ast.TupleExpression)
+    nested_assignment = tree.body[1]
+    assert isinstance(nested_assignment.targets[0], ast.TupleExpression)
+    assert isinstance(nested_assignment.targets[0].elements[1], ast.TupleExpression)
+
+    loop = tree.body[2]
+    assert isinstance(loop, ast.ForStatement)
+    assert isinstance(loop.target, ast.TupleExpression)
+    nested_target = loop.target.elements[1]
+    assert isinstance(nested_target, ast.TupleExpression)
+    assert isinstance(nested_target.elements[1], ast.StarredExpression)
+
+
+def test_starred_assignment_and_tuple_rhs():
+    source = (
+        "first, *rest = values\n"
+        "left, right = 1, 2\n"
+        "a = b = 3, 4\n"
+        "empty, () = values\n"
+    )
+    compile(source, "<test>", "exec")
+    statements = parse(source).body
+
+    assert isinstance(statements[0].targets[0].elements[1], ast.StarredExpression)
+    assert isinstance(statements[1].value, ast.TupleExpression)
+    assert statements[2].targets[1].name == "b"
+    assert isinstance(statements[2].value, ast.TupleExpression)
+    assert isinstance(statements[3].targets[0].elements[1], ast.TupleExpression)
+    assert statements[3].targets[0].elements[1].elements == []
+
+
+def test_unpacking_targets_in_comprehensions():
+    source = (
+        "result = {(key, value) for key, value in pairs}\n"
+        "nested = [first for first, (second, *rest) in rows]\n"
+    )
+    compile(source, "<test>", "exec")
+    dictionary_set, list_expression = [stmt.value for stmt in parse(source).body]
+
+    assert isinstance(dictionary_set, ast.SetComprehension)
+    assert isinstance(dictionary_set.generators[0].target, ast.TupleExpression)
+    assert isinstance(list_expression.generators[0].target, ast.TupleExpression)
+    assert isinstance(
+        list_expression.generators[0].target.elements[1].elements[1],
+        ast.StarredExpression,
+    )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "*rest = values\n",
+        "first, *middle, *rest = values\n",
+        "first + second = values\n",
+        "for *rest in values:\n    pass\n",
+        "for first, *middle, *rest in values:\n    pass\n",
+        "result = [item for *rest in values]\n",
+    ],
+)
+def test_invalid_unpacking_targets_match_cpython(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+
+    with pytest.raises(ParserError):
+        parse(source)
+
+
 def test_lambda_expression():
     tree = parse("f = lambda x: x + 1")
 
