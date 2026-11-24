@@ -144,7 +144,16 @@ class SemanticAnalyzer:
             self._declare_in_expr(stmt.value, scope)
 
         elif isinstance(stmt, ast.ExpressionStatement):
-            self._declare_in_expr(stmt.expression, scope)
+            if (
+                isinstance(stmt.expression, ast.TupleExpression)
+                and stmt.expression.elements
+                and all(isinstance(item, ast.ImportStatement) for item in stmt.expression.elements)
+            ):
+                for item in stmt.expression.elements:
+                    bound_name = item.alias or item.module.split(".")[0]
+                    scope.declare(bound_name, SymbolKind.IMPORT, item.line, item.column, item)
+            else:
+                self._declare_in_expr(stmt.expression, scope)
 
         elif isinstance(stmt, ast.ReturnStatement):
             self._declare_in_expr(stmt.value, scope)
@@ -374,7 +383,16 @@ class SemanticAnalyzer:
             self._bind_target(stmt.target, scope, defined)
 
         elif isinstance(stmt, ast.ExpressionStatement):
-            self._check_expr(stmt.expression, scope, defined)
+            if (
+                isinstance(stmt.expression, ast.TupleExpression)
+                and stmt.expression.elements
+                and all(isinstance(item, ast.ImportStatement) for item in stmt.expression.elements)
+            ):
+                for item in stmt.expression.elements:
+                    bound_name = item.alias or item.module.split(".")[0]
+                    self._bind(bound_name, scope, defined)
+            else:
+                self._check_expr(stmt.expression, scope, defined)
 
         elif isinstance(stmt, ast.ReturnStatement):
             if scope.kind not in (ScopeKind.FUNCTION, ScopeKind.LAMBDA):

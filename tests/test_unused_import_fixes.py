@@ -33,11 +33,10 @@ def test_from_import_and_trailing_comment_are_preserved():
 
 
 def test_multiple_imports_on_one_line_are_not_fixed():
-    source = "import os, sys\n"
+    source = "import os, sys\nprint(os.name)\n"
     diagnostics, fixes = lint(source)
-    # The current semantic analyzer does not report these tuple-wrapped
-    # import nodes; the fixer must still leave the source intact.
-    assert not any(d.fixable for d in diagnostics)
+    assert len(diagnostics) == 1
+    assert not diagnostics[0].fixable
     assert not fixes
     assert Fixer().apply_fixes(source, fixes) == source
 
@@ -45,7 +44,8 @@ def test_multiple_imports_on_one_line_are_not_fixed():
 def test_multiple_from_import_names_are_not_fixed():
     source = "from os import path, name\nprint(path)\n"
     diagnostics, fixes = lint(source)
-    assert diagnostics
+    assert len(diagnostics) == 1
+    assert not diagnostics[0].fixable
     assert not fixes
 
 
