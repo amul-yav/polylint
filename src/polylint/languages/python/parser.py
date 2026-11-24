@@ -501,53 +501,124 @@ class Parser:
         )
 
     def parse_parameters(self) -> list[ast.Parameter]:
-        parameters = []
+        return self._parse_parameter_list(")", allow_annotations=True)
 
-        while not self.check(")") and not self.check_type(TokenType.EOF):
+    def _parse_parameter_list(
+        self,
+        terminator: str,
+        *,
+        allow_annotations: bool,
+        reject_duplicates: bool = False,
+    ) -> list[ast.Parameter]:
+        parameters: list[ast.Parameter] = []
+        names: set[str] = set()
+        positional_count = 0
+        positional_default_seen = False
+        positional_only_seen = False
+        keyword_only_mode = False
+        keyword_only_count = 0
+        varargs_seen = False
+        bare_star_seen = False
+        kwargs_seen = False
+
+        while not self.check(terminator) and not self.check_type(TokenType.EOF):
             line, column = self.location()
-            kind = "normal"
-
-            if self.match("**"):
-                kind = "kwargs"
-            elif self.match("*"):
-                kind = "varargs"
 
             if self.match("/"):
+                if (
+                    positional_only_seen
+                    or keyword_only_mode
+                    or positional_count == 0
+                ):
+                    raise ParserError("invalid positional-only marker '/'", self.current)
+                positional_only_seen = True
                 parameters.append(
-                    ast.Parameter(line=line, column=column, name="/", kind="positional_only")
+                    ast.Parameter(
+                        line=line, column=column,
+                        name="/", kind="positional_only",
+                    )
                 )
                 if self.match(","):
+                    if self.check(terminator):
+                        break
                     continue
                 break
 
-            if self.match("**"):
-                kind = "kwargs"
+            if self.match("*"):
+                if varargs_seen or keyword_only_mode or kwargs_seen:
+                    raise ParserError("invalid '*' parameter", self.current)
 
-            if self.check_type(TokenType.IDENTIFIER):
-                name = self.advance().value
+                if self.check(","):
+                    # A bare '*' marks the start of keyword-only parameters.
+                    bare_star_seen = True
+                    keyword_only_mode = True
+                    self.advance()
+                    if self.check(terminator) or self.check("**"):
+                        raise ParserError(
+                            "a bare '*' must be followed by a keyword-only parameter",
+                            self.current,
+                        )
+                    continue
+
+                kind = "varargs"
+                varargs_seen = True
+                keyword_only_mode = True
+            elif self.match("**"):
+                if kwargs_seen:
+                    raise ParserError("multiple '**kwargs' parameters", self.current)
+                kind = "kwargs"
+                kwargs_seen = True
             else:
+                kind = "keyword_only" if keyword_only_mode else "normal"
+
+            if not self.check_type(TokenType.IDENTIFIER):
                 raise ParserError("Expected parameter name", self.current)
+            name = self.advance().value
+            if reject_duplicates and name in names:
+                raise ParserError(f"duplicate parameter name {name!r}", self.current)
+            names.add(name)
 
             annotation = None
             default = None
-
-            if self.match(":"):
+            if allow_annotations and self.match(":"):
                 annotation = self.parse_expression()
 
             if self.match("="):
+                if kind in ("varargs", "kwargs"):
+                    raise ParserError(f"{kind} parameter cannot have a default", self.current)
                 default = self.parse_expression()
+
+            if kind == "normal":
+                positional_count += 1
+                if default is None and positional_default_seen:
+                    raise ParserError(
+                        "a parameter without a default follows one with a default",
+                        self.current,
+                    )
+                positional_default_seen = positional_default_seen or default is not None
+            elif kind == "keyword_only":
+                keyword_only_count += 1
 
             parameters.append(
                 ast.Parameter(
-                    line=line, column=column,
-                    name=name, kind=kind,
+                    line=line, column=column, name=name, kind=kind,
                     default=default, annotation=annotation,
                 )
             )
 
+            if kind == "kwargs":
+                if self.match(",") and not self.check(terminator):
+                    raise ParserError("no parameter may follow '**kwargs'", self.current)
+                break
+
             if not self.match(","):
                 break
 
+        if bare_star_seen and keyword_only_count == 0:
+            raise ParserError(
+                "a bare '*' must be followed by a keyword-only parameter",
+                self.current,
+            )
         return parameters
 
     def parse_class_definition(
@@ -1044,39 +1115,9 @@ class Parser:
     # ==========================================
 
     def parse_parameters_until_colon(self) -> list[ast.Parameter]:
-        parameters = []
-
-        while not self.check(":") and not self.check_type(TokenType.EOF):
-            line, column = self.location()
-            kind = "normal"
-
-            if self.match("**"):
-                kind = "kwargs"
-            elif self.match("*"):
-                kind = "varargs"
-
-            if not self.check_type(TokenType.IDENTIFIER):
-                if self.check(":"):
-                    break
-                raise ParserError("Expected lambda parameter", self.current)
-
-            name = self.advance().value
-            default = None
-
-            if self.match("="):
-                default = self.parse_expression(2)
-
-            parameters.append(
-                ast.Parameter(
-                    line=line, column=column,
-                    name=name, kind=kind, default=default,
-                )
-            )
-
-            if not self.match(","):
-                break
-
-        return parameters
+        return self._parse_parameter_list(
+            ":", allow_annotations=False, reject_duplicates=True,
+        )
 
     def parse_expression_list(self) -> list[ast.ASTNode]:
         expressions = [self.parse_expression()]

@@ -387,6 +387,106 @@ def test_lambda_expression():
     assert expression.parameters[0].name == "x"
 
 
+def test_lambda_parameter_kinds_defaults_and_ordering():
+    source = (
+        "f = lambda positional, /, normal=2, *args, "
+        "required, optional=4, **kwargs: (\n"
+        "    positional, normal, args, required, optional, kwargs\n"
+        ")\n"
+    )
+    compile(source, "<test>", "exec")
+    parameters = parse(source).body[0].value.parameters
+
+    assert [parameter.name for parameter in parameters] == [
+        "positional", "/", "normal", "args", "required", "optional", "kwargs",
+    ]
+    assert parameters[1].kind == "positional_only"
+    assert parameters[2].kind == "normal"
+    assert parameters[2].default.value == 2
+    assert parameters[3].kind == "varargs"
+    assert parameters[4].kind == "keyword_only"
+    assert parameters[4].default is None
+    assert parameters[5].kind == "keyword_only"
+    assert parameters[5].default.value == 4
+    assert parameters[6].kind == "kwargs"
+
+
+def test_lambda_bare_keyword_only_separator():
+    source = "f = lambda value, *, required, optional=None: (value, required, optional)\n"
+    compile(source, "<test>", "exec")
+    parameters = parse(source).body[0].value.parameters
+
+    assert [parameter.kind for parameter in parameters] == [
+        "normal", "keyword_only", "keyword_only",
+    ]
+
+
+def test_lambda_default_can_be_a_conditional_expression():
+    source = "f = lambda value=1 if enabled else 2: value\n"
+    compile(source, "<test>", "exec")
+    default = parse(source).body[0].value.parameters[0].default
+
+    assert isinstance(default, ast.ConditionalExpression)
+
+
+def test_function_parameter_parser_preserves_annotations_and_adds_keyword_only():
+    source = (
+        "def f(value: int, /, normal: str = 'x', *args: object, "
+        "required: bool, optional: int = 3, **kwargs: object) -> int:\n"
+        "    return value\n"
+    )
+    compile(source, "<test>", "exec")
+    parameters = parse(source).body[0].parameters
+
+    assert [parameter.name for parameter in parameters] == [
+        "value", "/", "normal", "args", "required", "optional", "kwargs",
+    ]
+    assert parameters[0].annotation.name == "int"
+    assert parameters[4].kind == "keyword_only"
+    assert parameters[4].annotation.name == "bool"
+    assert parameters[6].kind == "kwargs"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "f = lambda /, value: value\n",
+        "f = lambda value, /, /, other: value\n",
+        "f = lambda *args, /: args\n",
+        "f = lambda value=1, other: value\n",
+        "f = lambda *, **kwargs: kwargs\n",
+        "f = lambda **kwargs, value: value\n",
+        "f = lambda value, value: value\n",
+        "f = lambda *args, *more: args\n",
+    ],
+)
+def test_invalid_lambda_parameter_forms_match_cpython(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+
+    with pytest.raises(ParserError):
+        parse(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def f(value=1, other):\n    pass\n",
+        "def f(/, value):\n    pass\n",
+        "def f(value, /, /, other):\n    pass\n",
+        "def f(*, **kwargs):\n    pass\n",
+        "def f(**kwargs, value):\n    pass\n",
+        "def f(*args, /):\n    pass\n",
+    ],
+)
+def test_invalid_function_parameter_order_matches_cpython(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+
+    with pytest.raises(ParserError):
+        parse(source)
+
+
 def test_nested_function():
     tree = parse(
         "def outer():\n"
