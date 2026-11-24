@@ -155,6 +155,7 @@ class ExceptHandler(ASTNode):
     exception: ASTNode | None = None
     name: str | None = None
     body: list[ASTNode] = field(default_factory=list)
+    is_star: bool = False
 
 
 @dataclass

@@ -219,3 +219,67 @@ def test_nested_function():
 def test_invalid_syntax():
     with pytest.raises(ParserError):
         parse("x = ")
+
+
+def test_exception_group_handlers_match_cpython_syntax():
+    source = (
+        "try:\n"
+        "    run()\n"
+        "except* (ValueError, TypeError) as errors:\n"
+        "    handle(errors)\n"
+        "else:\n"
+        "    finish()\n"
+        "finally:\n"
+        "    cleanup()\n"
+    )
+
+    compile(source, "<test>", "exec")
+    statement = parse(source).body[0]
+
+    assert isinstance(statement, ast.TryStatement)
+    assert len(statement.handlers) == 1
+    assert statement.handlers[0].is_star is True
+    assert isinstance(statement.handlers[0].exception, ast.TupleExpression)
+    assert statement.handlers[0].name == "errors"
+    assert statement.else_body
+    assert statement.finally_body
+
+
+def test_regular_exception_handler_keeps_legacy_ast_shape():
+    source = "try:\n    run()\nexcept ValueError as error:\n    recover(error)\n"
+    compile(source, "<test>", "exec")
+    handler = parse(source).body[0].handlers[0]
+
+    assert handler.is_star is False
+    assert isinstance(handler.exception, ast.Identifier)
+    assert handler.exception.name == "ValueError"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try:\n    run()\nexcept*:\n    recover()\n",
+        (
+            "try:\n"
+            "    run()\n"
+            "except* ValueError:\n"
+            "    recover()\n"
+            "except TypeError:\n"
+            "    recover()\n"
+        ),
+        (
+            "try:\n"
+            "    run()\n"
+            "except ValueError:\n"
+            "    recover()\n"
+            "except* TypeError:\n"
+            "    recover()\n"
+        ),
+    ],
+)
+def test_invalid_exception_group_handler_forms_match_cpython(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+
+    with pytest.raises(ParserError):
+        parse(source)

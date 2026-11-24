@@ -514,9 +514,18 @@ class Parser:
         handlers = []
         else_body = []
         finally_body = []
+        handler_kind = None
 
         while self.match("except"):
             handler_line, handler_column = self.location()
+            is_star = self.match("*")
+            current_kind = "except*" if is_star else "except"
+            if handler_kind is not None and current_kind != handler_kind:
+                raise ParserError(
+                    "cannot mix 'except' and 'except*' handlers", self.current,
+                )
+            handler_kind = current_kind
+
             exception = None
             name = None
 
@@ -524,12 +533,15 @@ class Parser:
                 exception = self.parse_expression()
                 if self.match("as"):
                     name = self.expect_type(TokenType.IDENTIFIER).value
+            elif is_star:
+                raise ParserError("'except*' requires an exception type", self.current)
 
             handler_body = self.parse_suite()
             handlers.append(
                 ast.ExceptHandler(
                     line=handler_line, column=handler_column,
                     exception=exception, name=name, body=handler_body,
+                    is_star=is_star,
                 )
             )
 
