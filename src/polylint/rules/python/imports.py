@@ -7,8 +7,11 @@ The other three are plain AST-pattern rules over the module body.
 
 from __future__ import annotations
 
+import re
+
 from polylint.core.diagnostics import Diagnostic
 from polylint.core.severity import Severity
+from polylint.fix.fixer import Fix, TextEdit
 from polylint.languages.python import ast_nodes as ast
 from polylint.rules.base import Rule, RuleContext, walk
 from polylint.rules.python.unused import _semantic_diagnostics, _translate
@@ -26,7 +29,83 @@ class UnusedImportRule(Rule):
     _CODES = {"PL-UNUSED-IMPORT"}
 
     def check(self, context: RuleContext) -> list[Diagnostic]:
-        return _translate(self, _semantic_diagnostics(context), self._CODES)
+        diagnostics = _translate(self, _semantic_diagnostics(context), self._CODES)
+        imports = [
+            node for node in walk(context.tree)
+            if isinstance(node, (ast.ImportStatement, ast.ImportFromStatement))
+        ]
+        result = []
+        for diagnostic in diagnostics:
+            fix = self._fix_for_diagnostic(context, diagnostic, imports)
+            if fix is not None:
+                context.add_fix(fix)
+                diagnostic = Diagnostic(
+                    rule_id=diagnostic.rule_id,
+                    message=diagnostic.message,
+                    line=diagnostic.line,
+                    column=diagnostic.column,
+                    severity=diagnostic.severity,
+                    file_path=diagnostic.file_path,
+                    end_line=diagnostic.end_line,
+                    end_column=diagnostic.end_column,
+                    fixable=True,
+                )
+            result.append(diagnostic)
+        return result
+
+    def _fix_for_diagnostic(self, context, diagnostic, imports):
+        """Delete a verified, single-name import while preserving comments."""
+        line_number = diagnostic.line
+        if line_number < 1 or line_number > len(context.source.splitlines()):
+            return None
+        lines = context.source.splitlines(keepends=True)
+        line = lines[line_number - 1]
+        if "\n" in line.rstrip("\r\n") or "\\" in line:
+            return None
+
+        candidates = [node for node in imports if node.line == line_number]
+        if len(candidates) != 1:
+            return None
+        node = candidates[0]
+        prefix = re.match(r"^[ \t]*", line).group(0)
+        body = line[len(prefix):].rstrip("\r\n")
+        comment_at = body.find("#")
+        code = body[:comment_at].rstrip() if comment_at >= 0 else body.rstrip()
+
+        if isinstance(node, ast.ImportStatement):
+            if not re.fullmatch(r"import\s+[^,;\s]+(?:\s+as\s+[A-Za-z_]\w*)?", code):
+                return None
+            expected = f"import {node.module}"
+            if node.alias:
+                expected += f" as {node.alias}"
+        else:
+            if len(node.names) != 1:
+                return None
+            name, alias = node.names[0]
+            if not re.fullmatch(r"from\s+[^;]+\s+import\s+[^,()\s]+(?:\s+as\s+[A-Za-z_]\w*)?", code):
+                return None
+            module = "." * node.level + node.module
+            expected = f"from {module} import {name}"
+            if alias:
+                expected += f" as {alias}"
+
+        if code != expected:
+            return None
+
+        line_start = sum(len(item) for item in lines[:line_number - 1])
+        code_start = line_start + len(prefix)
+        code_end = code_start + len(code)
+        if comment_at >= 0:
+            # Keep the comment text and indentation, dropping only code and
+            # the whitespace separating it from the comment.
+            end = line_start + len(prefix) + comment_at
+            replacement = ""
+        else:
+            # Remove the whole standalone statement, including its newline.
+            end = line_start + len(line)
+            code_start = line_start
+            replacement = ""
+        return Fix(self.id, diagnostic.message, (TextEdit(code_start, end, replacement),))
 
 
 @register

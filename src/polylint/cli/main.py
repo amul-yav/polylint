@@ -5,6 +5,7 @@ import typer
 from polylint.core.config import PolyLintConfig, ConfigError
 from polylint.core.severity import Severity
 from polylint.engine.rule_engine import RuleEngine
+from polylint.fix.fixer import FixError, Fixer
 from polylint.languages.python.lexer import Lexer
 from polylint.languages.python.parser import Parser, ParserError
 from polylint.formatter.python_formatter import (
@@ -80,6 +81,15 @@ def analyze_file(
     config: PolyLintConfig,
 ) -> tuple[list, str | None]:
     """Tokenize, parse, and run lint rules on one Python file."""
+    diagnostics, _fixes, error = analyze_file_with_fixes(file_path, config)
+    return diagnostics, error
+
+
+def analyze_file_with_fixes(
+    file_path: Path,
+    config: PolyLintConfig,
+) -> tuple[list, list, str | None]:
+    """Analyze one file and return any automatic fixes alongside diagnostics."""
 
     try:
         source = file_path.read_text(encoding="utf-8")
@@ -100,16 +110,16 @@ def analyze_file(
             severities=severities,
         )
 
-        diagnostics = engine.run(
+        diagnostics, fixes = engine.run_with_fixes(
             tree,
             source,
             file_path=str(file_path),
         )
 
-        return diagnostics, None
+        return diagnostics, fixes, None
 
     except (SyntaxError, ParserError, UnicodeDecodeError, OSError) as error:
-        return [], str(error)
+        return [], [], str(error)
 
 
 @app.command()
@@ -123,6 +133,11 @@ def check(
         "--config",
         "-c",
         help="Path to a PolyLint configuration file.",
+    ),
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Apply available automatic fixes to files.",
     ),
 ):
     """Check Python files for lint errors."""
@@ -142,7 +157,21 @@ def check(
     total_errors = 0
 
     for file in files:
-        diagnostics, error = analyze_file(file, settings)
+        if fix:
+            diagnostics, fixes, error = analyze_file_with_fixes(file, settings)
+            if error is None and fixes:
+                try:
+                    original = file.read_text(encoding="utf-8")
+                    fixed = Fixer().apply_fixes(original, fixes)
+                    if fixed != original:
+                        file.write_text(fixed, encoding="utf-8")
+                        typer.echo(f"Fixed: {file}")
+                except (FixError, OSError, UnicodeDecodeError) as fix_error:
+                    typer.echo(f"Error processing {file}: {fix_error}", err=True)
+                    total_errors += 1
+                    continue
+        else:
+            diagnostics, error = analyze_file(file, settings)
 
         if error:
             typer.echo(f"{file}: error: {error}")
