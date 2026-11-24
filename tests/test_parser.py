@@ -1,4 +1,6 @@
 
+import ast as cpython_ast
+
 import pytest
 
 from polylint.languages.python.lexer import Lexer
@@ -9,6 +11,74 @@ from polylint.languages.python import ast_nodes as ast
 def parse(source):
     tokens = Lexer(source).tokenize()
     return Parser(tokens).parse()
+
+
+@pytest.mark.parametrize("source", [
+    "name: int\n",
+    "name: int = 10\n",
+    "obj.attribute: str = 'value'\n",
+    "items[index]: float = 1.5\n",
+    "class Record:\n    field: list[int]\n",
+    "def build():\n    result: int\n    result = 1\n",
+])
+def test_annotated_assignments_compile_and_parse(source):
+    compile(source, "<test>", "exec")
+    statement = parse(source).body[0]
+    if isinstance(statement, ast.ClassDefinition):
+        statement = statement.body[0]
+    elif isinstance(statement, ast.FunctionDefinition):
+        statement = statement.body[0]
+    assert isinstance(statement, ast.AnnotatedAssignment)
+    assert statement.annotation is not None
+
+
+def test_annotation_with_attribute_and_subscript_targets_preserves_target_nodes():
+    tree = parse("obj.attribute: str = 'value'\nitems[index]: float = 1.5\n")
+    assert isinstance(tree.body[0].target, ast.AttributeAccess)
+    assert isinstance(tree.body[1].target, ast.SubscriptExpression)
+
+
+@pytest.mark.parametrize("source, expected_name", [
+    ("type Point = tuple[int, int]\n", "Point"),
+    ("type Names = list[str]\n", "Names"),
+])
+def test_type_alias_uses_python_312_grammar(source, expected_name):
+    # CPython 3.14 lets us request the 3.12 grammar for source validation.
+    parsed = cpython_ast.parse(source, feature_version=(3, 12))
+    compile(parsed, "<test>", "exec")
+    statement = parse(source).body[0]
+    assert isinstance(statement, ast.TypeAliasStatement)
+    assert statement.name == expected_name
+
+
+def test_type_soft_keyword_remains_an_ordinary_identifier():
+    source = "type = object\ntype: int = 3\n"
+    compile(source, "<test>", "exec")
+    tree = parse(source)
+    assert isinstance(tree.body[0], ast.Assignment)
+    assert isinstance(tree.body[1], ast.AnnotatedAssignment)
+
+
+@pytest.mark.parametrize("source", [
+    "first, second: int = (1, 2)\n",
+    "1: int = 1\n",
+])
+def test_invalid_annotated_assignment_or_alias_syntax_is_rejected(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+    with pytest.raises(ParserError):
+        parse(source)
+
+
+@pytest.mark.parametrize("source", [
+    "type Names list[str]\n",
+    "type Names =\n",
+])
+def test_invalid_type_alias_syntax_matches_python_312_grammar(source):
+    with pytest.raises(SyntaxError):
+        cpython_ast.parse(source, feature_version=(3, 12))
+    with pytest.raises(ParserError):
+        parse(source)
 
 
 @pytest.mark.parametrize("pattern", [

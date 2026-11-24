@@ -742,6 +742,28 @@ class TestStructuralPatternMatching:
         )
         assert not has(diags, "PL-UNDEF-LOCAL")
 
+
+class TestAnnotationsAndTypeAliases:
+    def test_annotated_assignment_checks_annotation_and_binds_assigned_name(self):
+        diags = analyze("count: int = 3\nprint(count)\n")
+        assert not has(diags, "PL-UNDEF")
+
+    def test_annotation_only_local_is_declared_but_not_assigned(self):
+        diags = analyze(
+            "def read():\n"
+            "    value: int\n"
+            "    return value\n"
+            "read()\n"
+        )
+        assert has(diags, "PL-UNDEF-LOCAL")
+
+    def test_type_alias_name_is_bound_and_alias_value_is_checked(self):
+        diags = analyze(
+            "type Names = list[str]\n"
+            "print(Names)\n"
+        )
+        assert not has(diags, "PL-UNDEF")
+
     def test_value_patterns_are_checked_as_name_uses(self):
         diags = analyze(
             "match value:\n"

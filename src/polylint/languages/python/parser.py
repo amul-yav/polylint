@@ -556,6 +556,19 @@ class Parser:
     def parse_small_statement(self) -> ast.ASTNode:
         line, column = self.location()
 
+        if (
+            self.current.value == "type"
+            and self.peek().type == TokenType.IDENTIFIER
+            and self.peek(2).value == "="
+        ):
+            self.advance()
+            name = self.advance().value
+            self.expect("=")
+            value = self.parse_expression()
+            return ast.TypeAliasStatement(
+                line=line, column=column, name=name, value=value,
+            )
+
         if self.match("pass"):
             return ast.PassStatement(line=line, column=column)
 
@@ -623,6 +636,15 @@ class Parser:
     def parse_assignment_or_expression(self) -> ast.ASTNode:
         line, column = self.location()
         expression = self.parse_expression()
+
+        if self.match(":"):
+            self._validate_target(expression, allow_unpacking=False)
+            annotation = self.parse_expression()
+            value = self.parse_assignment_value() if self.match("=") else None
+            return ast.AnnotatedAssignment(
+                line=line, column=column,
+                target=expression, annotation=annotation, value=value,
+            )
 
         if self.check(","):
             expression = self.parse_target_list(
@@ -1773,6 +1795,22 @@ class Parser:
 
         if not self.check(":"):
             start = self.parse_expression()
+
+        if self.match(",") and not self.check(":"):
+            indices = [start]
+            while not self.check("]") and not self.check_type(TokenType.EOF):
+                indices.append(self.parse_expression())
+                if not self.match(","):
+                    break
+            index = ast.TupleExpression(
+                line=token.line, column=token.column,
+                elements=indices,
+            )
+            self.expect("]")
+            return ast.SubscriptExpression(
+                line=token.line, column=token.column,
+                value=value, index=index,
+            )
 
         if self.match(":"):
             if not self.check("]") and not self.check(":"):

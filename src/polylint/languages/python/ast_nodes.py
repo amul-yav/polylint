@@ -34,6 +34,19 @@ class Assignment(ASTNode):
 
 
 @dataclass
+class AnnotatedAssignment(ASTNode):
+    target: ASTNode | None = None
+    annotation: ASTNode | None = None
+    value: ASTNode | None = None
+
+
+@dataclass
+class TypeAliasStatement(ASTNode):
+    name: str = ""
+    value: ASTNode | None = None
+
+
+@dataclass
 class AugmentedAssignment(ASTNode):
     target: ASTNode | None = None
     operator: str = ""

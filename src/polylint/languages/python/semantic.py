@@ -134,7 +134,16 @@ class SemanticAnalyzer:
             self._declare_stmt(stmt, scope)
 
     def _declare_stmt(self, stmt: ast.ASTNode, scope: Scope) -> None:
-        if isinstance(stmt, ast.Assignment):
+        if isinstance(stmt, ast.AnnotatedAssignment):
+            self._declare_target(stmt.target, scope, SymbolKind.VARIABLE)
+            self._declare_in_expr(stmt.annotation, scope)
+            self._declare_in_expr(stmt.value, scope)
+
+        elif isinstance(stmt, ast.TypeAliasStatement):
+            scope.declare(stmt.name, SymbolKind.VARIABLE, stmt.line, stmt.column, stmt)
+            self._declare_in_expr(stmt.value, scope)
+
+        elif isinstance(stmt, ast.Assignment):
             for target in stmt.targets:
                 self._declare_target(target, scope, SymbolKind.VARIABLE)
             self._declare_in_expr(stmt.value, scope)
@@ -381,7 +390,20 @@ class SemanticAnalyzer:
             self._check_expr(target, scope, defined)
 
     def _check_stmt(self, stmt: ast.ASTNode, scope: Scope, defined: set) -> None:
-        if isinstance(stmt, ast.Assignment):
+        if isinstance(stmt, ast.AnnotatedAssignment):
+            self._check_expr(stmt.annotation, scope, defined)
+            self._check_expr(stmt.value, scope, defined)
+            if isinstance(stmt.target, ast.Identifier):
+                if stmt.value is not None:
+                    self._bind_target(stmt.target, scope, defined)
+            else:
+                self._check_expr(stmt.target, scope, defined)
+
+        elif isinstance(stmt, ast.TypeAliasStatement):
+            self._check_expr(stmt.value, scope, defined)
+            self._bind(stmt.name, scope, defined)
+
+        elif isinstance(stmt, ast.Assignment):
             self._check_expr(stmt.value, scope, defined)
             for target in stmt.targets:
                 self._bind_target(target, scope, defined)
