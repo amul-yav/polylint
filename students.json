@@ -1,0 +1,50 @@
+[
+    {
+        "name": "Alice",
+        "age": 20,
+        "roll_no": 101,
+        "marks": [
+            92,
+            88,
+            95
+        ],
+        "average": 91.66666666666667,
+        "grade": "A"
+    },
+    {
+        "name": "Bob",
+        "age": 21,
+        "roll_no": 102,
+        "marks": [
+            76,
+            81,
+            79
+        ],
+        "average": 78.66666666666667,
+        "grade": "B"
+    },
+    {
+        "name": "Charlie",
+        "age": 19,
+        "roll_no": 103,
+        "marks": [
+            55,
+            60,
+            58
+        ],
+        "average": 57.666666666666664,
+        "grade": "D"
+    },
+    {
+        "name": "David",
+        "age": 20,
+        "roll_no": 104,
+        "marks": [
+            95,
+            98,
+            94
+        ],
+        "average": 95.66666666666667,
+        "grade": "A"
+    }
+]
