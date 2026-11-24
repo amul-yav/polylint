@@ -152,6 +152,9 @@ class Parser:
         if self.check("@"):
             return [self.parse_decorated_definition()]
 
+        if self.check("match") and self._looks_like_match_statement():
+            return [self.parse_match_statement()]
+
         if self.match("async"):
             if self.match("def"):
                 return [self.parse_function_definition(is_async=True)]
@@ -183,6 +186,357 @@ class Parser:
             return [self.parse_with_statement()]
 
         return self.parse_simple_statement()
+
+    def _looks_like_match_statement(self) -> bool:
+        """Recognize the soft keyword only for a match block header."""
+        depth = 0
+        for index in range(self.position + 1, len(self.tokens)):
+            token = self.tokens[index]
+            if token.type == TokenType.NEWLINE and depth == 0:
+                return False
+            if token.value in ("(", "[", "{"):
+                depth += 1
+            elif token.value in (")", "]", "}"):
+                depth = max(0, depth - 1)
+            elif token.value == ":" and depth == 0:
+                return (
+                    index + 2 < len(self.tokens)
+                    and self.tokens[index + 1].type == TokenType.NEWLINE
+                    and self.tokens[index + 2].type == TokenType.INDENT
+                )
+        return False
+
+    def parse_match_statement(self) -> ast.MatchStatement:
+        token = self.expect("match")
+        subject = self.parse_expression()
+        if self.match(","):
+            elements = [subject]
+            while not self.check(":"):
+                elements.append(self.parse_expression())
+                if not self.match(","):
+                    break
+            subject = ast.TupleExpression(
+                line=subject.line, column=subject.column, elements=elements,
+            )
+        self.expect(":")
+        if not self.check_type(TokenType.NEWLINE):
+            raise ParserError("a match statement requires an indented case block", self.current)
+        self.advance()
+        self.expect_type(TokenType.INDENT)
+
+        cases = []
+        self.skip_newlines()
+        while not self.check_type(TokenType.DEDENT) and not self.check_type(TokenType.EOF):
+            if not self.check("case"):
+                raise ParserError("expected 'case' in match statement", self.current)
+            case = self.parse_match_case()
+            if cases and cases[-1].guard is None and self._is_irrefutable(cases[-1].pattern):
+                raise ParserError("an unguarded irrefutable case must be last", self.current)
+            cases.append(case)
+            self.skip_newlines()
+
+        self.expect_type(TokenType.DEDENT)
+        if not cases:
+            raise ParserError("a match statement must contain at least one case", self.current)
+        return ast.MatchStatement(
+            line=token.line, column=token.column, subject=subject, cases=cases,
+        )
+
+    def parse_match_case(self) -> ast.MatchCase:
+        token = self.expect("case")
+        if self.check("*"):
+            pattern = self.parse_pattern_atom(allow_starred=True)
+            if not self.check(","):
+                raise ParserError("a star pattern must be part of a sequence pattern", self.current)
+        else:
+            pattern = self.parse_pattern()
+        if self.match(","):
+            patterns = [pattern]
+            while not self.check("if") and not self.check(":"):
+                patterns.append(self.parse_pattern(allow_starred=True))
+                if not self.match(","):
+                    break
+            self._validate_star_pattern_count(patterns)
+            names = [name for item in patterns for name in self._pattern_capture_names(item)]
+            if len(names) != len(set(names)):
+                raise ParserError("a pattern cannot bind the same name more than once", self.current)
+            pattern = ast.SequencePattern(
+                line=pattern.line, column=pattern.column, patterns=patterns,
+            )
+        guard = self.parse_expression() if self.match("if") else None
+        body = self.parse_suite()
+        return ast.MatchCase(
+            line=token.line, column=token.column,
+            pattern=pattern, guard=guard, body=body,
+        )
+
+    def parse_pattern(self, *, allow_starred: bool = False) -> ast.ASTNode:
+        pattern = self.parse_pattern_atom(allow_starred=allow_starred)
+        alternatives = [pattern]
+        while self.match("|"):
+            alternatives.append(self.parse_pattern_atom(allow_starred=allow_starred))
+
+        if len(alternatives) > 1:
+            if any(self._is_irrefutable(item) for item in alternatives[:-1]):
+                raise ParserError("an irrefutable pattern must be last in an OR pattern", self.current)
+            branch_names = [set(self._pattern_capture_names(item)) for item in alternatives]
+            if any(names != branch_names[0] for names in branch_names[1:]):
+                raise ParserError("all OR pattern alternatives must bind the same names", self.current)
+            pattern = ast.OrPattern(
+                line=pattern.line, column=pattern.column, patterns=alternatives,
+            )
+
+        if self.match("as"):
+            name_token = self.expect_type(TokenType.IDENTIFIER)
+            if name_token.value == "_":
+                raise ParserError("'_' cannot be used as an AS pattern target", name_token)
+            pattern = ast.AsPattern(
+                line=pattern.line,
+                column=pattern.column,
+                pattern=pattern,
+                name=ast.CapturePattern(
+                    line=name_token.line, column=name_token.column,
+                    name=name_token.value,
+                ),
+            )
+
+        names = self._pattern_capture_names(pattern)
+        if len(names) != len(set(names)):
+            raise ParserError("a pattern cannot bind the same name more than once", self.current)
+        return pattern
+
+    def parse_pattern_atom(self, *, allow_starred: bool = False) -> ast.ASTNode:
+        token = self.current
+        line, column = token.line, token.column
+
+        if self.match("*"):
+            if not allow_starred:
+                raise ParserError("star patterns are only allowed in sequences", token)
+            inner = self.parse_pattern_atom()
+            if not isinstance(inner, (ast.CapturePattern, ast.WildcardPattern)):
+                raise ParserError("a star pattern must capture a name or wildcard", token)
+            return ast.StarPattern(line=line, column=column, pattern=inner)
+
+        if self.match("["):
+            patterns = self.parse_sequence_pattern_items("]")
+            return ast.SequencePattern(line=line, column=column, patterns=patterns)
+
+        if self.match("("):
+            if self.match(")"):
+                return ast.SequencePattern(line=line, column=column, patterns=[])
+            first = self.parse_pattern(allow_starred=True)
+            if not self.match(","):
+                self.expect(")")
+                return first
+            patterns = [first]
+            while not self.check(")") and not self.check_type(TokenType.EOF):
+                patterns.append(self.parse_pattern(allow_starred=True))
+                if not self.match(","):
+                    break
+            self.expect(")")
+            self._validate_star_pattern_count(patterns)
+            return ast.SequencePattern(line=line, column=column, patterns=patterns)
+
+        if self.match("{"):
+            return self.parse_mapping_pattern(token)
+
+        if token.value in ("+", "-"):
+            sign = -1 if self.advance().value == "-" else 1
+            number = self.current
+            if number.type not in (TokenType.INTEGER, TokenType.FLOAT):
+                raise ParserError("expected a number after pattern sign", number)
+            self.advance()
+            raw = number.value.replace("_", "")
+            try:
+                value = float(raw) if number.type == TokenType.FLOAT else int(raw, 0) if raw.lower().startswith(("0x", "0o", "0b")) else int(raw)
+            except ValueError:
+                raise ParserError("invalid numeric literal pattern", number) from None
+            return ast.Literal(line=line, column=column, value=sign * value)
+
+        if token.type in (TokenType.INTEGER, TokenType.FLOAT, TokenType.STRING):
+            if token.type == TokenType.STRING and self._is_fstring_literal(token.value):
+                raise ParserError("f-strings are not literal patterns", token)
+            return self.parse_prefix()
+
+        if token.value in ("True", "False", "None"):
+            return self.parse_prefix()
+
+        if token.type == TokenType.IDENTIFIER:
+            value = self.parse_dotted_pattern_value()
+            if self.check("("):
+                return self.parse_class_pattern(value)
+            if isinstance(value, ast.Identifier) and value.name == "_":
+                return ast.WildcardPattern(line=line, column=column)
+            if isinstance(value, ast.Identifier):
+                return ast.CapturePattern(line=line, column=column, name=value.name)
+            return ast.ValuePattern(line=line, column=column, value=value)
+
+        raise ParserError("expected a pattern", token)
+
+    def parse_sequence_pattern_items(self, closing: str) -> list[ast.ASTNode]:
+        patterns = []
+        if self.match(closing):
+            return patterns
+        while True:
+            patterns.append(self.parse_pattern(allow_starred=True))
+            if not self.match(","):
+                break
+            if self.check(closing):
+                break
+        self.expect(closing)
+        self._validate_star_pattern_count(patterns)
+        return patterns
+
+    def _validate_star_pattern_count(self, patterns: list[ast.ASTNode]) -> None:
+        if sum(isinstance(pattern, ast.StarPattern) for pattern in patterns) > 1:
+            raise ParserError("a sequence pattern may contain only one star pattern", self.current)
+
+    def parse_mapping_pattern(self, opening: Token) -> ast.MappingPattern:
+        entries = []
+        rest = None
+        keys = set()
+        if self.match("}"):
+            return ast.MappingPattern(line=opening.line, column=opening.column)
+
+        while True:
+            if self.match("**"):
+                if rest is not None:
+                    raise ParserError("a mapping pattern may contain only one '**' rest pattern", self.current)
+                rest_token = self.expect_type(TokenType.IDENTIFIER)
+                if rest_token.value == "_":
+                    raise ParserError("'_' is not allowed as a mapping rest target", rest_token)
+                rest = ast.CapturePattern(
+                    line=rest_token.line, column=rest_token.column,
+                    name=rest_token.value,
+                )
+                if self.match(",") and not self.check("}"):
+                    raise ParserError("a mapping rest pattern must be last", self.current)
+                break
+
+            key = self.parse_mapping_pattern_key()
+            if isinstance(key, ast.Literal):
+                key_marker = (type(key.value), key.value)
+                if key_marker in keys:
+                    raise ParserError("duplicate mapping pattern key", self.current)
+                keys.add(key_marker)
+            self.expect(":")
+            value_pattern = self.parse_pattern()
+            entries.append((key, value_pattern))
+            if not self.match(",") or self.check("}"):
+                break
+
+        self.expect("}")
+        return ast.MappingPattern(
+            line=opening.line, column=opening.column,
+            entries=entries, rest=rest,
+        )
+
+    def parse_mapping_pattern_key(self) -> ast.ASTNode:
+        token = self.current
+        if token.value in ("+", "-"):
+            sign = -1 if self.advance().value == "-" else 1
+            number = self.current
+            if number.type not in (TokenType.INTEGER, TokenType.FLOAT):
+                raise ParserError("expected a number after pattern key sign", number)
+            self.advance()
+            raw = number.value.replace("_", "")
+            try:
+                value = float(raw) if number.type == TokenType.FLOAT else int(raw, 0) if raw.lower().startswith(("0x", "0o", "0b")) else int(raw)
+            except ValueError:
+                raise ParserError("invalid numeric mapping pattern key", number) from None
+            return ast.Literal(line=token.line, column=token.column, value=sign * value)
+        if token.type in (TokenType.INTEGER, TokenType.FLOAT, TokenType.STRING) or token.value in ("True", "False", "None"):
+            if token.type == TokenType.STRING and self._is_fstring_literal(token.value):
+                raise ParserError("f-strings are not mapping pattern keys", token)
+            return self.parse_prefix()
+        if token.type == TokenType.IDENTIFIER:
+            value = self.parse_dotted_pattern_value()
+            if isinstance(value, ast.Identifier):
+                raise ParserError("a mapping pattern key must be a literal or dotted value", token)
+            return value
+        raise ParserError("expected a mapping pattern key", token)
+
+    def parse_dotted_pattern_value(self) -> ast.ASTNode:
+        token = self.expect_type(TokenType.IDENTIFIER)
+        value: ast.ASTNode = ast.Identifier(
+            line=token.line, column=token.column, name=token.value,
+        )
+        while self.match("."):
+            attribute = self.expect_type(TokenType.IDENTIFIER)
+            value = ast.AttributeAccess(
+                line=attribute.line, column=attribute.column,
+                object=value, attribute=attribute.value,
+            )
+        return value
+
+    def parse_class_pattern(self, class_expression: ast.ASTNode) -> ast.ClassPattern:
+        opening = self.expect("(")
+        positional = []
+        keywords = []
+        keyword_names = set()
+        seen_keyword = False
+
+        while not self.check(")") and not self.check_type(TokenType.EOF):
+            if (
+                self.current.type == TokenType.IDENTIFIER
+                and self.peek().value == "="
+            ):
+                seen_keyword = True
+                name = self.advance().value
+                self.advance()
+                if name in keyword_names:
+                    raise ParserError(f"duplicate class pattern keyword {name!r}", self.current)
+                keyword_names.add(name)
+                keywords.append((name, self.parse_pattern()))
+            else:
+                if seen_keyword:
+                    raise ParserError("positional patterns cannot follow keyword patterns", self.current)
+                positional.append(self.parse_pattern())
+
+            if not self.match(","):
+                break
+
+        self.expect(")")
+        return ast.ClassPattern(
+            line=opening.line, column=opening.column,
+            class_expression=class_expression,
+            positional_patterns=positional,
+            keyword_patterns=keywords,
+        )
+
+    def _pattern_capture_names(self, pattern: ast.ASTNode) -> list[str]:
+        if isinstance(pattern, ast.CapturePattern):
+            return [pattern.name]
+        if isinstance(pattern, ast.AsPattern):
+            return self._pattern_capture_names(pattern.pattern) + [pattern.name.name]
+        if isinstance(pattern, ast.StarPattern):
+            return self._pattern_capture_names(pattern.pattern)
+        if isinstance(pattern, ast.OrPattern):
+            return self._pattern_capture_names(pattern.patterns[0])
+        if isinstance(pattern, ast.SequencePattern):
+            return [name for item in pattern.patterns for name in self._pattern_capture_names(item)]
+        if isinstance(pattern, ast.MappingPattern):
+            names = [name for _, item in pattern.entries for name in self._pattern_capture_names(item)]
+            if pattern.rest:
+                names.append(pattern.rest.name)
+            return names
+        if isinstance(pattern, ast.ClassPattern):
+            names = [name for item in pattern.positional_patterns for name in self._pattern_capture_names(item)]
+            names.extend(
+                name for _, item in pattern.keyword_patterns
+                for name in self._pattern_capture_names(item)
+            )
+            return names
+        return []
+
+    def _is_irrefutable(self, pattern: ast.ASTNode) -> bool:
+        if isinstance(pattern, (ast.CapturePattern, ast.WildcardPattern)):
+            return True
+        if isinstance(pattern, ast.AsPattern):
+            return self._is_irrefutable(pattern.pattern)
+        if isinstance(pattern, ast.OrPattern):
+            return any(self._is_irrefutable(item) for item in pattern.patterns)
+        return False
 
     def parse_simple_statement(self) -> list[ast.ASTNode]:
         statements = [self.parse_small_statement()]

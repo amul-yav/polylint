@@ -731,3 +731,29 @@ class TestEdgeCases:
             "print(result)\n"
         )
         assert diags == []
+
+
+class TestStructuralPatternMatching:
+    def test_capture_names_are_available_in_case_guard_and_body(self):
+        diags = analyze(
+            "match value:\n"
+            "    case {'item': item} if item is not None:\n"
+            "        print(item)\n"
+        )
+        assert not has(diags, "PL-UNDEF-LOCAL")
+
+    def test_value_patterns_are_checked_as_name_uses(self):
+        diags = analyze(
+            "match value:\n"
+            "    case Colors.RED:\n"
+            "        pass\n"
+        )
+        assert has(diags, "PL-UNDEF")
+
+    def test_or_pattern_capture_is_bound_once(self):
+        diags = analyze(
+            "match value:\n"
+            "    case [item] | (item,):\n"
+            "        print(item)\n"
+        )
+        assert not has(diags, "PL-UNDEF-LOCAL")

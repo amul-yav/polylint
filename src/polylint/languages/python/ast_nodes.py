@@ -151,6 +151,19 @@ class TryStatement(ASTNode):
 
 
 @dataclass
+class MatchStatement(ASTNode):
+    subject: ASTNode | None = None
+    cases: list[ASTNode] = field(default_factory=list)
+
+
+@dataclass
+class MatchCase(ASTNode):
+    pattern: ASTNode | None = None
+    guard: ASTNode | None = None
+    body: list[ASTNode] = field(default_factory=list)
+
+
+@dataclass
 class ExceptHandler(ASTNode):
     exception: ASTNode | None = None
     name: str | None = None
@@ -171,6 +184,55 @@ class Parameter(ASTNode):
     kind: str = "normal"
     default: ASTNode | None = None
     annotation: ASTNode | None = None
+
+
+@dataclass
+class CapturePattern(ASTNode):
+    name: str = ""
+
+
+@dataclass
+class WildcardPattern(ASTNode):
+    pass
+
+
+@dataclass
+class ValuePattern(ASTNode):
+    value: ASTNode | None = None
+
+
+@dataclass
+class OrPattern(ASTNode):
+    patterns: list[ASTNode] = field(default_factory=list)
+
+
+@dataclass
+class AsPattern(ASTNode):
+    pattern: ASTNode | None = None
+    name: CapturePattern | None = None
+
+
+@dataclass
+class SequencePattern(ASTNode):
+    patterns: list[ASTNode] = field(default_factory=list)
+
+
+@dataclass
+class StarPattern(ASTNode):
+    pattern: ASTNode | None = None
+
+
+@dataclass
+class MappingPattern(ASTNode):
+    entries: list[tuple[ASTNode, ASTNode]] = field(default_factory=list)
+    rest: CapturePattern | None = None
+
+
+@dataclass
+class ClassPattern(ASTNode):
+    class_expression: ASTNode | None = None
+    positional_patterns: list[ASTNode] = field(default_factory=list)
+    keyword_patterns: list[tuple[str, ASTNode]] = field(default_factory=list)
 
 
 # -------------------------

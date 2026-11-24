@@ -228,6 +228,15 @@ class SemanticAnalyzer:
                     self._declare_target(target, scope, SymbolKind.VARIABLE)
             self._declare_block(stmt.body, scope)
 
+        elif isinstance(stmt, ast.MatchStatement):
+            self._declare_in_expr(stmt.subject, scope)
+            for case in stmt.cases:
+                for name in self._pattern_names(case.pattern):
+                    scope.declare(name, SymbolKind.VARIABLE, case.line, case.column, case)
+                self._declare_pattern_expressions(case.pattern, scope)
+                self._declare_in_expr(case.guard, scope)
+                self._declare_block(case.body, scope)
+
         elif isinstance(stmt, ast.FunctionDefinition):
             for decorator in stmt.decorators:
                 self._declare_in_expr(decorator, scope)
@@ -502,11 +511,79 @@ class SemanticAnalyzer:
                     self._bind_target(target, scope, defined)
             self._check_block(stmt.body, scope, defined)
 
+        elif isinstance(stmt, ast.MatchStatement):
+            self._check_expr(stmt.subject, scope, defined)
+            for case in stmt.cases:
+                self._check_pattern_expressions(case.pattern, scope, defined)
+                for name in self._pattern_names(case.pattern):
+                    self._bind(name, scope, defined)
+                self._check_expr(case.guard, scope, defined)
+                self._check_block(case.body, scope, defined)
+
         elif isinstance(stmt, ast.FunctionDefinition):
             self._check_function(stmt, scope, defined)
 
         elif isinstance(stmt, ast.ClassDefinition):
             self._check_class(stmt, scope, defined)
+
+    def _pattern_names(self, pattern: Optional[ast.ASTNode]) -> list[str]:
+        if isinstance(pattern, ast.CapturePattern):
+            return [pattern.name]
+        if isinstance(pattern, ast.StarPattern):
+            return self._pattern_names(pattern.pattern)
+        if isinstance(pattern, ast.AsPattern):
+            return self._pattern_names(pattern.pattern) + self._pattern_names(pattern.name)
+        if isinstance(pattern, ast.OrPattern):
+            return self._pattern_names(pattern.patterns[0]) if pattern.patterns else []
+        if isinstance(pattern, ast.SequencePattern):
+            return [name for item in pattern.patterns for name in self._pattern_names(item)]
+        if isinstance(pattern, ast.MappingPattern):
+            names = [name for _, item in pattern.entries for name in self._pattern_names(item)]
+            return names + self._pattern_names(pattern.rest)
+        if isinstance(pattern, ast.ClassPattern):
+            items = pattern.positional_patterns + [item for _, item in pattern.keyword_patterns]
+            return [name for item in items for name in self._pattern_names(item)]
+        return []
+
+    def _declare_pattern_expressions(self, pattern: Optional[ast.ASTNode], scope: Scope) -> None:
+        if isinstance(pattern, ast.ValuePattern):
+            self._declare_in_expr(pattern.value, scope)
+        elif isinstance(pattern, ast.MappingPattern):
+            for key, item in pattern.entries:
+                self._declare_in_expr(key, scope)
+                self._declare_pattern_expressions(item, scope)
+        elif isinstance(pattern, ast.ClassPattern):
+            self._declare_in_expr(pattern.class_expression, scope)
+            for item in pattern.positional_patterns:
+                self._declare_pattern_expressions(item, scope)
+            for _, item in pattern.keyword_patterns:
+                self._declare_pattern_expressions(item, scope)
+        elif isinstance(pattern, (ast.SequencePattern, ast.OrPattern)):
+            for item in pattern.patterns:
+                self._declare_pattern_expressions(item, scope)
+        elif isinstance(pattern, (ast.AsPattern, ast.StarPattern)):
+            self._declare_pattern_expressions(pattern.pattern, scope)
+
+    def _check_pattern_expressions(
+        self, pattern: Optional[ast.ASTNode], scope: Scope, defined: set,
+    ) -> None:
+        if isinstance(pattern, ast.ValuePattern):
+            self._check_expr(pattern.value, scope, defined)
+        elif isinstance(pattern, ast.MappingPattern):
+            for key, item in pattern.entries:
+                self._check_expr(key, scope, defined)
+                self._check_pattern_expressions(item, scope, defined)
+        elif isinstance(pattern, ast.ClassPattern):
+            self._check_expr(pattern.class_expression, scope, defined)
+            for item in pattern.positional_patterns:
+                self._check_pattern_expressions(item, scope, defined)
+            for _, item in pattern.keyword_patterns:
+                self._check_pattern_expressions(item, scope, defined)
+        elif isinstance(pattern, (ast.SequencePattern, ast.OrPattern)):
+            for item in pattern.patterns:
+                self._check_pattern_expressions(item, scope, defined)
+        elif isinstance(pattern, (ast.AsPattern, ast.StarPattern)):
+            self._check_pattern_expressions(pattern.pattern, scope, defined)
 
     def _enter_loop(self, scope: Scope, body: list[ast.ASTNode], defined: set) -> None:
         previously = getattr(scope, "_polylint_in_loop", False)

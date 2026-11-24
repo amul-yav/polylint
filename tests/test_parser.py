@@ -11,6 +11,73 @@ def parse(source):
     return Parser(tokens).parse()
 
 
+@pytest.mark.parametrize("pattern", [
+    "None", "True", "42", "-1", "'ready'", "_", "name",
+    "1 | 2", "[first, second]", "(head, *tail)",
+    "{'kind': kind, **rest}", "Point(x, y=coordinate)", "first, *rest",
+    "(1 | 2) as selected",
+])
+def test_match_statement_pattern_forms_compile_and_parse(pattern):
+    source = f"match subject:\n    case {pattern} if allowed:\n        pass\n"
+    compile(source, "<test>", "exec")
+    statement = parse(source).body[0]
+
+    assert isinstance(statement, ast.MatchStatement)
+    assert len(statement.cases) == 1
+    assert statement.cases[0].guard is not None
+
+
+def test_match_statement_builds_distinct_pattern_nodes_and_nested_cases():
+    source = (
+        "match value:\n"
+        "    case [0, {'point': Point(x, y=other)}, *remaining]:\n"
+        "        result = x + other\n"
+        "    case _:\n"
+        "        result = None\n"
+    )
+    compile(source, "<test>", "exec")
+    statement = parse(source).body[0]
+    pattern = statement.cases[0].pattern
+
+    assert isinstance(pattern, ast.SequencePattern)
+    assert isinstance(pattern.patterns[1], ast.MappingPattern)
+    class_pattern = pattern.patterns[1].entries[0][1]
+    assert isinstance(class_pattern, ast.ClassPattern)
+    assert isinstance(pattern.patterns[2], ast.StarPattern)
+    assert isinstance(statement.cases[1].pattern, ast.WildcardPattern)
+
+
+def test_match_soft_keyword_remains_an_identifier_outside_match_statement():
+    source = "match = 1\ncase = match\n"
+    compile(source, "<test>", "exec")
+    tree = parse(source)
+    assert all(isinstance(statement, ast.Assignment) for statement in tree.body)
+
+
+def test_unguarded_irrefutable_case_must_be_last():
+    source = "match value:\n    case _:\n        pass\n    case 1:\n        pass\n"
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+    with pytest.raises(ParserError):
+        parse(source)
+
+
+@pytest.mark.parametrize("source", [
+    "match value:\n    case x | 1:\n        pass\n",
+    "match value:\n    case x | y:\n        pass\n",
+    "match value:\n    case [*first, *second]:\n        pass\n",
+    "match value:\n    case {'x': first, 'x': second}:\n        pass\n",
+    "match value:\n    case Point(x=first, x=second):\n        pass\n",
+    "match value:\n    case Point(x=first, second):\n        pass\n",
+    "match value:\n    case first as first:\n        pass\n",
+])
+def test_invalid_match_patterns_are_rejected_by_cpython_and_polylint(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "exec")
+    with pytest.raises(ParserError):
+        parse(source)
+
+
 def test_empty_module():
     tree = parse("")
     assert isinstance(tree, ast.Module)
