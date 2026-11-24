@@ -337,3 +337,17 @@ class StarredExpression(ASTNode):
 @dataclass
 class FStringExpression(ASTNode):
     value: str = ""
+    parts: list[ASTNode] = field(default_factory=list)
+
+
+@dataclass
+class FStringText(ASTNode):
+    value: str = ""
+
+
+@dataclass
+class FStringField(ASTNode):
+    expression: ASTNode | None = None
+    conversion: str | None = None
+    format_spec: list[ASTNode] = field(default_factory=list)
+    debug_text: str | None = None

@@ -1,5 +1,6 @@
 
 from polylint.languages.python.tokens import Token, TokenType
+from polylint.languages.python.lexer import Lexer
 from polylint.languages.python import ast_nodes as ast
 
 
@@ -1090,10 +1091,8 @@ class Parser:
                     line=line, column=column, value=literal_value,
                 )
 
-            if value.startswith(("f'", 'f"', "F'", 'F"')):
-                return ast.FStringExpression(
-                    line=line, column=column, value=value,
-                )
+            if self._is_fstring_literal(value):
+                return self._parse_fstring(token, value)
 
             return ast.Literal(
                 line=line, column=column, value=value,
@@ -1109,6 +1108,212 @@ class Parser:
             )
 
         raise ParserError("Expected expression", token)
+
+    @staticmethod
+    def _is_fstring_literal(value: str) -> bool:
+        prefix_end = 0
+        while prefix_end < len(value) and value[prefix_end].isalpha():
+            prefix_end += 1
+        return "f" in value[:prefix_end].lower()
+
+    def _parse_fstring(self, token: Token, value: str) -> ast.FStringExpression:
+        prefix_end = 0
+        while prefix_end < len(value) and value[prefix_end].isalpha():
+            prefix_end += 1
+        quote_index = prefix_end
+        quote = value[quote_index]
+        delimiter = quote * 3 if value.startswith(quote * 3, quote_index) else quote
+        body = value[quote_index + len(delimiter):-len(delimiter)]
+        return ast.FStringExpression(
+            line=token.line,
+            column=token.column,
+            value=value,
+            parts=self._parse_fstring_parts(body, token.line, token.column),
+        )
+
+    def _parse_fstring_parts(
+        self,
+        content: str,
+        line: int,
+        column: int,
+    ) -> list[ast.ASTNode]:
+        parts: list[ast.ASTNode] = []
+        text: list[str] = []
+        index = 0
+
+        def flush_text() -> None:
+            if text:
+                parts.append(ast.FStringText(line=line, column=column, value="".join(text)))
+                text.clear()
+
+        while index < len(content):
+            if content.startswith("{{", index):
+                text.append("{")
+                index += 2
+                continue
+            if content.startswith("}}", index):
+                text.append("}")
+                index += 2
+                continue
+            if content[index] == "}":
+                raise ParserError("single '}' is not allowed in an f-string")
+            if content[index] != "{":
+                text.append(content[index])
+                index += 1
+                continue
+
+            flush_text()
+            closing = self._find_fstring_field_end(content, index + 1)
+            if closing is None:
+                raise ParserError("expected '}' to close f-string field")
+            parts.append(
+                self._parse_fstring_field(content[index + 1:closing], line, column)
+            )
+            index = closing + 1
+
+        flush_text()
+        return parts
+
+    @staticmethod
+    def _find_fstring_field_end(content: str, start: int) -> int | None:
+        brackets: list[str] = []
+        index = start
+
+        while index < len(content):
+            char = content[index]
+            if char in "'\"":
+                quote = char
+                delimiter = quote * 3 if content.startswith(quote * 3, index) else quote
+                index += len(delimiter)
+                while index < len(content):
+                    if content.startswith(delimiter, index):
+                        index += len(delimiter)
+                        break
+                    if content[index] == "\\":
+                        index += 2
+                    else:
+                        index += 1
+                continue
+            if char == "#":
+                newline = content.find("\n", index)
+                index = len(content) if newline < 0 else newline + 1
+                continue
+            if char in "([{":
+                brackets.append({"(": ")", "[": "]", "{": "}"}[char])
+            elif char in ")]}":
+                if brackets and char == brackets[-1]:
+                    brackets.pop()
+                elif char == "}" and not brackets:
+                    return index
+            index += 1
+
+        return None
+
+    def _parse_fstring_field(
+        self,
+        content: str,
+        line: int,
+        column: int,
+    ) -> ast.FStringField:
+        expression_end = len(content)
+        conversion = None
+        format_text = ""
+        debug_text = None
+        brackets: list[str] = []
+        index = 0
+        delimiter_kind = None
+
+        while index < len(content):
+            char = content[index]
+            if char in "'\"":
+                quote = char
+                delimiter = quote * 3 if content.startswith(quote * 3, index) else quote
+                index += len(delimiter)
+                while index < len(content):
+                    if content.startswith(delimiter, index):
+                        index += len(delimiter)
+                        break
+                    if content[index] == "\\":
+                        index += 2
+                    else:
+                        index += 1
+                continue
+            if char in "([{":
+                brackets.append({"(": ")", "[": "]", "{": "}"}[char])
+                index += 1
+                continue
+            if char in ")]}":
+                if brackets and char == brackets[-1]:
+                    brackets.pop()
+                index += 1
+                continue
+            if not brackets:
+                if char == "!" and not content.startswith("!=", index):
+                    expression_end = index
+                    delimiter_kind = "conversion"
+                    break
+                if char == ":" and not content.startswith(":=", index):
+                    expression_end = index
+                    delimiter_kind = "format"
+                    break
+                if char == "=" and not (
+                    content.startswith(("==", "!=", "<=", ">=", ":="), index)
+                    or (index > 0 and content[index - 1] in "=!<>:")
+                ):
+                    expression_end = index
+                    debug_text = content[:index + 1]
+                    index += 1
+                    delimiter_kind = "debug"
+                    break
+            index += 1
+
+        expression_text = content[:expression_end].strip()
+        if not expression_text:
+            raise ParserError("empty expression in f-string field")
+
+        if delimiter_kind == "conversion":
+            conversion_index = index + 1
+            if conversion_index >= len(content) or content[conversion_index] not in "rsa":
+                raise ParserError("invalid f-string conversion; expected !s, !r, or !a")
+            conversion = content[conversion_index]
+            index = conversion_index + 1
+            if index < len(content):
+                if content[index] != ":":
+                    raise ParserError("unexpected text after f-string conversion")
+                format_text = content[index + 1:]
+        elif delimiter_kind == "format":
+            format_text = content[index + 1:]
+        elif delimiter_kind == "debug":
+            while index < len(content) and content[index].isspace():
+                index += 1
+            debug_text = content[:index]
+            if index < len(content) and content[index] == "!":
+                if index + 1 >= len(content) or content[index + 1] not in "rsa":
+                    raise ParserError("invalid f-string conversion; expected !s, !r, or !a")
+                conversion = content[index + 1]
+                index += 2
+                while index < len(content) and content[index].isspace():
+                    index += 1
+            if index < len(content):
+                if content[index] != ":":
+                    raise ParserError("unexpected text after f-string debug expression")
+                format_text = content[index + 1:]
+
+        expression_tokens = Lexer(expression_text).tokenize()
+        expression_parser = Parser(expression_tokens)
+        expression = expression_parser.parse_expression()
+        if not expression_parser.check_type(TokenType.EOF):
+            raise ParserError("unexpected text in f-string expression", expression_parser.current)
+
+        return ast.FStringField(
+            line=line,
+            column=column,
+            expression=expression,
+            conversion=conversion,
+            format_spec=self._parse_fstring_parts(format_text, line, column)
+            if format_text else [],
+            debug_text=debug_text,
+        )
 
     # ==========================================
     # Expression helpers

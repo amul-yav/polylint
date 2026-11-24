@@ -505,6 +505,91 @@ def test_invalid_syntax():
         parse("x = ")
 
 
+def test_fstring_literal_text_and_replacement_expressions():
+    source = 'message = f"Hello {user.name}, {count + 1}!"\n'
+    compile(source, "<test>", "exec")
+    expression = parse(source).body[0].value
+
+    assert isinstance(expression, ast.FStringExpression)
+    assert [type(part) for part in expression.parts] == [
+        ast.FStringText, ast.FStringField, ast.FStringText,
+        ast.FStringField, ast.FStringText,
+    ]
+    assert isinstance(expression.parts[1].expression, ast.AttributeAccess)
+    assert isinstance(expression.parts[3].expression, ast.BinaryOperation)
+
+
+@pytest.mark.parametrize("conversion", ["s", "r", "a"])
+def test_fstring_conversion_flags(conversion):
+    source = f'value = f"{{value!{conversion}}}"\n'
+    compile(source, "<test>", "exec")
+    field = parse(source).body[0].value.parts[0]
+
+    assert isinstance(field, ast.FStringField)
+    assert field.conversion == conversion
+
+
+def test_fstring_format_specification_and_nested_fields():
+    source = 'formatted = f"{value:{width}.{precision}f}"\n'
+    compile(source, "<test>", "exec")
+    field = parse(source).body[0].value.parts[0]
+
+    assert isinstance(field, ast.FStringField)
+    assert len(field.format_spec) == 4
+    assert isinstance(field.format_spec[0], ast.FStringField)
+    assert isinstance(field.format_spec[2], ast.FStringField)
+    assert field.format_spec[3].value == "f"
+
+
+def test_fstring_escaped_braces_and_debug_conversion():
+    source = 'message = f"{{name}} = {name = !r}"\n'
+    compile(source, "<test>", "exec")
+    expression = parse(source).body[0].value
+
+    assert expression.parts[0].value == "{name} = "
+    assert expression.parts[1].debug_text == "name = "
+    assert expression.parts[1].conversion == "r"
+
+
+def test_fstring_nested_quotes_and_nested_fstring_expression():
+    source = 'message = f"outer {f\'{mapping["key"]}\'}"\n'
+    compile(source, "<test>", "exec")
+    outer_field = parse(source).body[0].value.parts[1]
+
+    assert isinstance(outer_field.expression, ast.FStringExpression)
+    inner_field = outer_field.expression.parts[0]
+    assert isinstance(inner_field.expression, ast.SubscriptExpression)
+
+
+def test_raw_and_multiline_fstring_parts():
+    source = 'message = rf"""path={path}\\n{name}\n"""\n'
+    compile(source, "<test>", "exec")
+    expression = parse(source).body[0].value
+
+    assert isinstance(expression, ast.FStringExpression)
+    assert expression.parts[0].value == "path="
+    assert expression.parts[2].value == "\\n"
+    assert expression.parts[-1].value == "\n"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'f"literal }"',
+        'f"{}"',
+        'f"{value!q}"',
+        'f"{value"',
+        'f"{value:.2f"',
+    ],
+)
+def test_invalid_fstrings_match_cpython(source):
+    with pytest.raises(SyntaxError):
+        compile(source, "<test>", "eval")
+
+    with pytest.raises((ParserError, SyntaxError)):
+        parse(source)
+
+
 def test_exception_group_handlers_match_cpython_syntax():
     source = (
         "try:\n"

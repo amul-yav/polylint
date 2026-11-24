@@ -243,6 +243,24 @@ def test_combined_string_prefixes(source):
     assert tokens[0].value == source
 
 
+def test_fstring_token_scans_quotes_inside_replacement_fields():
+    source = 'f"{mapping["key"]}"'
+    tokens = get_tokens(source)
+
+    assert len(tokens) == 1
+    assert tokens[0].type == TokenType.STRING
+    assert tokens[0].value == source
+
+
+def test_raw_multiline_fstring_remains_one_string_token():
+    source = 'rf"""path={path}\\n{name}"""'
+    tokens = get_tokens(source)
+
+    assert len(tokens) == 1
+    assert tokens[0].type == TokenType.STRING
+    assert tokens[0].value == source
+
+
 # ============================================================
 # 7. TRIPLE-QUOTED STRINGS
 # ============================================================

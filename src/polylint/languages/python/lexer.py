@@ -588,6 +588,9 @@ class Lexer:
             delimiter = quote
             self.advance()
 
+        if "f" in prefix.lower():
+            return self.read_fstring(start, line, column, delimiter, triple)
+
         while self.position < len(self.source):
 
             if self.source.startswith(delimiter, self.position):
@@ -625,4 +628,132 @@ class Lexer:
 
         raise SyntaxError(
             f"Unterminated string at line {line}, column {column}"
+        )
+
+    def read_fstring(self, start, line, column, delimiter, triple):
+        """Scan an f-string as one token without confusing field quotes for
+        the outer string delimiter."""
+        fields = []
+
+        while self.position < len(self.source):
+            if not fields:
+                if self.source.startswith(delimiter, self.position):
+                    for _ in delimiter:
+                        self.advance()
+                    return Token(
+                        TokenType.STRING,
+                        self.source[start:self.position],
+                        line,
+                        column,
+                    )
+
+                char = self.source[self.position]
+                if char == "\\":
+                    self.advance()
+                    if self.position < len(self.source) and self.source[self.position] in "'\"":
+                        self.advance()
+                    elif self.source.startswith("\r\n", self.position):
+                        self.advance()
+                        self.advance()
+                    elif self.position < len(self.source) and self.source[self.position] == "\n":
+                        self.advance()
+                    continue
+                if char == "{" and self.source.startswith("{{", self.position):
+                    self.advance()
+                    self.advance()
+                    continue
+                if char == "}":
+                    if self.source.startswith("}}", self.position):
+                        self.advance()
+                        self.advance()
+                        continue
+                    raise SyntaxError(
+                        f"Single '}}' in f-string at line {self.line}, "
+                        f"column {self.column}"
+                    )
+                if char == "{":
+                    self.advance()
+                    fields.append({"mode": "expression", "brackets": []})
+                    continue
+                if char == "\n" and not triple:
+                    raise SyntaxError(
+                        f"Unterminated string at line {line}, column {column}"
+                    )
+                self.advance()
+                continue
+
+            field = fields[-1]
+            char = self.source[self.position]
+
+            if field["mode"] == "format":
+                if char == "{":
+                    self.advance()
+                    fields.append({"mode": "expression", "brackets": []})
+                elif char == "}":
+                    self.advance()
+                    fields.pop()
+                else:
+                    self.advance()
+                continue
+
+            if char in "'\"":
+                self._skip_fstring_quoted_string()
+                continue
+            if char == "#":
+                while self.position < len(self.source) and self.source[self.position] != "\n":
+                    self.advance()
+                continue
+            if char == "\\" and self.source.startswith("\\\n", self.position):
+                self.advance()
+                self.advance()
+                continue
+            if char in "([":
+                field["brackets"].append({"(": ")", "[": "]"}[char])
+                self.advance()
+                continue
+            if char == "{":
+                field["brackets"].append("}")
+                self.advance()
+                continue
+            if char in ")]}" and field["brackets"]:
+                if char == field["brackets"][-1]:
+                    field["brackets"].pop()
+                self.advance()
+                continue
+            if char == "}" and not field["brackets"]:
+                self.advance()
+                fields.pop()
+                continue
+            if (
+                char == ":"
+                and not field["brackets"]
+                and not self.source.startswith(":=", self.position)
+            ):
+                field["mode"] = "format"
+            self.advance()
+
+        raise SyntaxError(f"Unterminated f-string at line {line}, column {column}")
+
+    def _skip_fstring_quoted_string(self):
+        quote = self.source[self.position]
+        triple = self.source.startswith(quote * 3, self.position)
+        delimiter = quote * 3 if triple else quote
+        for _ in delimiter:
+            self.advance()
+
+        while self.position < len(self.source):
+            if self.source.startswith(delimiter, self.position):
+                for _ in delimiter:
+                    self.advance()
+                return
+            if self.source[self.position] == "\\":
+                self.advance()
+                if self.position < len(self.source):
+                    self.advance()
+            else:
+                self.advance()
+
+        raise SyntaxError(
+            f"Unterminated string in f-string at line {self.line}, "
+            f"column {self.column}"
         )
